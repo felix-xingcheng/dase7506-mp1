@@ -10,13 +10,14 @@ from torch import nn
 from torch.nn import functional as F
 
 class Block(nn.Module):
-    def __init__(self, width=128, heads=4):
+    def __init__(self, width=128, heads=4, dropout=0.0, hidden_multiplier=8 / 3):
         super().__init__()
         self.heads = heads
+        self.dropout = dropout
         self.norm1, self.norm2 = nn.LayerNorm(width), nn.LayerNorm(width)  #归一化
         self.qkv, self.proj = nn.Linear(width, 3 * width), nn.Linear(width, width) #qkv输出3*width是为了一次性表示qkv，然后拆分为q,k,v
-        #self.mlp = nn.Sequential(nn.Linear(width, 4 * width), nn.GELU(), nn.Linear(4 * width, width))#先升维增强表示性，做特征层后再降维恢复原始维度
-        self.mlp = GatedMLP(width)
+        self.mlp = GatedMLP(width, hidden_multiplier)
+        self.residual_dropout = nn.Dropout(dropout)
 
     def apply_rope(self, x):
         # x: [batch, heads, length, head_dim]
@@ -36,14 +37,16 @@ class Block(nn.Module):
         q, k, v = self.qkv(self.norm1(x)).view(batch, length, 3, self.heads, width // self.heads).permute(2, 0, 3, 1, 4)#view将width按qkv以及头的长度拆分，permute调换顺序，方便分离qkv
         # Each position attends only to itself and earlier input tokens.
         q, k = self.apply_rope(q), self.apply_rope(k)  
-        attended = F.scaled_dot_product_attention(q, k, v, is_causal=True)#集成的attention函数，在内部计算att分数并与V相乘出结果
-        x = x + self.proj(attended.transpose(1, 2).reshape(batch, length, width))#将注意力结果与原始输入相加，再通过投影层进一步处理
-        return x + self.mlp(self.norm2(x))#先归一化再做第二次残差求和
+        attended = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.dropout if self.training else 0.0, is_causal=True
+        )#集成的attention函数，在内部计算att分数并与V相乘出结果
+        x = x + self.residual_dropout(self.proj(attended.transpose(1, 2).reshape(batch, length, width)))#将注意力结果与原始输入相加，再通过投影层进一步处理
+        return x + self.residual_dropout(self.mlp(self.norm2(x)))#先归一化再做第二次残差求和
 
 class GatedMLP(nn.Module):
-    def __init__(self, width):
+    def __init__(self, width, hidden_multiplier=8 / 3):
         super().__init__()
-        hidden = int(8 * width / 3)
+        hidden = int(hidden_multiplier * width)
         self.up = nn.Linear(width, hidden)
         self.gate = nn.Linear(width, hidden)
         self.down = nn.Linear(hidden, width)
@@ -57,13 +60,17 @@ class GPT(nn.Module):
         self.config = dict(config)
         self.context = config['context']
         width = config['width']
+        dropout = config.get('dropout', 0.0)
+        hidden_multiplier = config.get('hidden_multiplier', 8 / 3)
         self.token = nn.Embedding(config['vocab'], width)
-       #self.pos = nn.Embedding(self.context, width)#为什么这样写可以起到位置编码的效果
-        self.blocks = nn.ModuleList([Block(width, config['heads']) for _ in range(config['depth'])])#重复四遍
+        self.embedding_dropout = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList([
+            Block(width, config['heads'], dropout, hidden_multiplier)
+            for _ in range(config['depth'])
+        ])
         self.norm = nn.LayerNorm(width)
-        self.head = nn.Linear(width, config['vocab'], bias=False)
+        self.head = nn.Linear(width, config['vocab'], bias=True)
         self.apply(self.initialize)
-        self.head.weight = self.token.weight
 
     @staticmethod
     def initialize(module):#初始化权重
@@ -74,7 +81,7 @@ class GPT(nn.Module):
 
 
     def features(self, ids):#编码+四遍decoding(block)
-        x = self.token(ids) #+ self.pos(torch.arange(ids.shape[1], device=ids.device))#pos这里提取ids的token数量，然后加上位置编码
+        x = self.embedding_dropout(self.token(ids))
         for block in self.blocks:
             x = block(x)
         return self.norm(x)

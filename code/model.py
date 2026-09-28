@@ -42,7 +42,7 @@ class GPT(nn.Module):
             if getattr(module, 'bias', None) is not None:
                 nn.init.zeros_(module.bias)
 
-    def features(self, ids):
+    def features(self, ids):#编码+四遍decoding(block)
         x = self.token(ids) + self.pos(torch.arange(ids.shape[1], device=ids.device))#pos这里提取ids的token数量，然后加上位置编码
         for block in self.blocks:
             x = block(x)

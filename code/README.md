@@ -2,4 +2,4 @@ The instructions for installation, training, evaluation, and the AI disclosure a
 
 [../README.md](../README.md)
 
-The submitted checkpoint is `checkpoints/depth8-4k.pt`.
+The submitted checkpoint is `checkpoints/depth10-160-12000.pt`.

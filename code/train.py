@@ -46,6 +46,9 @@ def main():
     history = []
     validation_history = []
     intermediate_validation_seconds = 0.
+    best_validation = None
+    best_state = None
+    best_step = 0
     for step in range(args.steps):
         starts = torch.randint(len(tokens)-257, (args.batch_size,), generator=rng).to(device)
         batch = tokens[starts[:,None]+torch.arange(257,device=device)]
@@ -69,19 +72,33 @@ def main():
             intermediate_validation_seconds += intermediate['seconds']
             validation_history.append({'step':step+1,**intermediate})
             print(json.dumps({'validation':validation_history[-1]}),flush=True)
+            if best_validation is None or intermediate['bpb'] < best_validation['bpb']:
+                best_validation = dict(intermediate)
+                best_state = {name: value.detach().cpu().clone()
+                              for name, value in model.state_dict().items()}
+                best_step = step + 1
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     train_seconds = time.perf_counter()-started-intermediate_validation_seconds
-    validation = score(model,*data['validation'],device,'fp32')
-    validation.pop('window_nll_nats')
+    final_validation = score(model,*data['validation'],device,'fp32')
+    final_validation.pop('window_nll_nats')
+    if best_validation is None or final_validation['bpb'] < best_validation['bpb']:
+        best_validation = dict(final_validation)
+        best_state = {name: value.detach().cpu().clone()
+                      for name, value in model.state_dict().items()}
+        best_step = args.steps
     checkpoint = args.run_dir/'checkpoint.pt'
     torch.save({'protocol':PROTOCOL,'implementation':args.implementation,'config':config,
-                'model':model.cpu().state_dict(),'seed':args.seed,
-                'train_tokens':args.steps*args.batch_size*256},checkpoint)
+                'model':best_state,'seed':args.seed,
+                'train_tokens':best_step*args.batch_size*256,
+                'selected_step':best_step},checkpoint)
     result = {'protocol':PROTOCOL,'implementation':args.implementation,'config':config,'seed':args.seed,
               'parameters':sum(p.numel() for p in model.parameters()),'precision':precision,
-              'train_tokens':args.steps*args.batch_size*256,'preparation_seconds':preparation_seconds,
-              'train_seconds':train_seconds,'validation':validation,'history':history,
+              'train_tokens':args.steps*args.batch_size*256,
+              'selected_train_tokens':best_step*args.batch_size*256,
+              'selected_step':best_step,'preparation_seconds':preparation_seconds,
+              'train_seconds':train_seconds,'validation':best_validation,
+              'final_validation':final_validation,'history':history,
               'validation_history':validation_history,
               'intermediate_validation_seconds':intermediate_validation_seconds,
               'process_seconds':time.perf_counter()-total_started,

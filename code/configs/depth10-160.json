@@ -1,0 +1,9 @@
+{
+  "vocab": 2048,
+  "width": 160,
+  "heads": 4,
+  "depth": 10,
+  "context": 256,
+  "dropout": 0.1,
+  "hidden_multiplier": 2.6666666666666665
+}
